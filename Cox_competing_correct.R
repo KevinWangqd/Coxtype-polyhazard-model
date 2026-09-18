@@ -880,9 +880,9 @@ calculate_total_hazard <- function(time_points, result, transformed_data) {
 
 library(survival)
 
-compute_iAUC <- function(transformed_data, result){
+compute_iAUC <- function(transformed_data, result, timepoint){
   
-  time_points <- quantile(transformed_data$time, probs = seq(0.01, 0.99, by = 0.05))
+  time_points <- timepoint
   total_hazard <- calculate_total_hazard(time_points, result, transformed_data)
   
   time_AUC <- riskRegression::Score(
@@ -900,12 +900,12 @@ compute_iAUC <- function(transformed_data, result){
   )
 
 
-  return(iAUC = mean(time_AUC$AUC$score$AUC,na.rm = T))
+  return(iAUC = mean(time_AUC$AUC$score$AUC))
 }
 
-compute_iBS <- function(transformed_data, result){
+compute_iBS <- function(transformed_data, result, timepoint){
   
-  time_points <- quantile(transformed_data$time, probs = seq(0.01, 0.99, by = 0.05))
+  time_points <- timepoint
   total_hazard <- calculate_total_hazard(time_points, result, transformed_data)
   
   bs_res <- riskRegression::Score(
@@ -920,6 +920,6 @@ compute_iBS <- function(transformed_data, result){
     cens.model  = "km"
   )
   
-  return(iBS=mean(bs_res$Brier$score$Brier[which(bs_res$Brier$score$model=="competingCox")],na.rm = T)
+  return(iBS= mean(bs_res$Brier$score$Brier[which(bs_res$Brier$score$model=="competingCox")])
   )
 }
