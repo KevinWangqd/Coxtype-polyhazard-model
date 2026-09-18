@@ -1,4 +1,4 @@
-data_transform <- function(time, status, X, label, param=NULL) {
+data_transform <- function(time, status, X, label, param=NULL, cluster=NULL) {
   # Check for NA values in inputs
   if (any(is.na(time))) stop("Time contains NA values.")
   if (any(is.na(status))) stop("status contains NA values.")
@@ -23,7 +23,8 @@ data_transform <- function(time, status, X, label, param=NULL) {
   time <- time[ord]
   status <- status[ord]
   X <- X[ord, , drop = FALSE]
- 
+  if (!is.null(cluster)) { cluster <- cluster[ord]} else { cluster <- seq_along(time)} # each individual is their own cluster
+  
   ## --- Group structure ---
   groups <- unique(unlist(label))
   L <- length(groups)
@@ -65,7 +66,7 @@ data_transform <- function(time, status, X, label, param=NULL) {
   return(list(
     time = time,            
     status = status, 
-    X = X_list, init_param = init_param
+    X = X_list, init_param = init_param, cluster=cluster
   ))
 }
 
@@ -124,7 +125,8 @@ Cox_com_fit <- function(transformed_data,  maxit = 1000, tolerance = 1e-6, frail
         bh_times = lapply(param_new, function(x) x$bh_times),
         cum_lambda   = lapply(param_new, function(x) x$cum_lambda),
         beta     = lapply(param_new, function(x) x$beta),
-        sigma2    = sigma2)  
+        sigma2    = sigma2,
+        cluster = transformed_data$cluster)  
       
       b_hat <- b_hat_fit$b
       sigma2 <- b_hat_fit$sigma2
@@ -324,40 +326,52 @@ make_pseudo <- function(time, status, X, eta, b_hat, var_b) {
 
 
 
-update_frailty_gaussian_sigma <- function(time, status, X, bh_times, cum_lambda, beta, sigma2) {
+update_frailty_gaussian_sigma <- function(time, status, X, bh_times, cum_lambda, beta, sigma2, cluster) {
   
   n <- length(time)
   L <- length(X)
+  clusters <- unique(cluster)
+  C <- length(clusters)
   
-  # Compute cumulative hazards
-  cumhaz_total <- numeric(n)
+  # Compute individual cumulative hazards H_i
+  cumhaz_indiv <- numeric(n)
   for (l in seq_len(L)) {
     idx <- findInterval(time, bh_times[[l]])
-    cumhaz_total <- cumhaz_total + cum_lambda[[l]][idx] * exp(drop(X[[l]] %*% beta[[l]]))
+    cumhaz_indiv <- cumhaz_indiv + cum_lambda[[l]][idx] * exp(drop(X[[l]] %*% beta[[l]]))
   }
   
-  # Posterior mode of b_i
-  b <- sapply(seq_len(n), function(i) {
-    f <- function(bi) status[i] - cumhaz_total[i] * exp(bi) - bi / sigma2
+  # Aggregate to cluster level
+  delta_sum <- tapply(status, cluster, sum)
+  cumhaz_sum <- tapply(cumhaz_indiv, cluster, sum)
+  
+  # Posterior mode of b_c for each cluster
+  
+  b_cluster <- sapply(seq_len(C), function(c) {
+    f <- function(bc) delta_sum[c] - cumhaz_sum[c] * exp(bc) - bc / sigma2
     tryCatch(
       uniroot(f, lower = -20, upper = 20)$root,
       error = function(e) {
-        max(min(log(max(status[i], 1e-6) / max(cumhaz_total[i], 1e-6)), 10), -10)
+        max(min(log(max(delta_sum[c], 1e-6) / max(cumhaz_sum[c], 1e-6)), 10), -10)
       }
     )
   })
   
-  var_b <- 1 / (cumhaz_total * exp(b) + 1 / sigma2)
+  # Posterior variance of b_c for each cluster
+  var_b_cluster <- 1 / (cumhaz_sum * exp(b_cluster) + 1 / sigma2)
   
-  # Update sigma^2
-  sigma2_new <- mean(b^2 + var_b)
+  # Update sigma^2 using cluster-level moments
+  sigma2_new <- mean(b_cluster^2 + var_b_cluster)
+  
+  # Map back to individual level
+  b <- b_cluster[match(cluster, clusters)]
+  var_b <- var_b_cluster[match(cluster, clusters)]
+  
   
   return(list(b = b, sigma2 = sigma2_new, var_b = var_b))
 }
 
 
-
-
+  
 
 
 
@@ -867,6 +881,8 @@ calculate_total_hazard <- function(time_points, result, transformed_data) {
       total_hazard <- total_hazard + baseline_hazard_l * exp_Xbeta[[l]]
     }
     
+    
+    
     return(total_hazard)
   })
   
@@ -923,3 +939,4 @@ compute_iBS <- function(transformed_data, result){
   return(iBS=mean(bs_res$Brier$score$Brier[which(bs_res$Brier$score$model=="competingCox")])
   )
 }
+

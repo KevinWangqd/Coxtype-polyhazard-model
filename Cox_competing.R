@@ -71,7 +71,7 @@ data_transform <- function(time, status, X, label, param=NULL) {
 
 
 
-Cox_com_fit <- function(transformed_data,  maxit = 1000, tolerance = 1e-6, frailty = FALSE, sigma2=1, penalty=0) {
+Cox_com_fit <- function(transformed_data, penalty=0, maxit = 1000, tolerance = 1e-6, frailty = FALSE, sigma2=1) {
   
   # Number of groups
   L <- length(transformed_data$X)
@@ -89,7 +89,7 @@ Cox_com_fit <- function(transformed_data,  maxit = 1000, tolerance = 1e-6, frail
   }
   p_total <- sum(sapply(transformed_data$X, ncol))
   #eps = max(min(0.05, 0.25 /p_total),0.01)
-  eps = ifelse(frailty==TRUE, 0.03, ifelse(p_total<8, 0.05, ifelse(p_total<10, 0.035, 0.01)))
+  eps = ifelse(p_total<8, 0.05, ifelse(p_total<10, 0.025, 0.01))
   
   # Convergence tracker for each group
   stop_vec <- rep(FALSE, L)
@@ -128,7 +128,6 @@ Cox_com_fit <- function(transformed_data,  maxit = 1000, tolerance = 1e-6, frail
       
       b_hat <- b_hat_fit$b
       sigma2 <- b_hat_fit$sigma2
-      var_b <- b_hat_fit$var_b
 
     } else {
       eta_matrix <- eta_matrix_fun(
@@ -140,7 +139,6 @@ Cox_com_fit <- function(transformed_data,  maxit = 1000, tolerance = 1e-6, frail
         beta   = lapply(param_new, function(x) x$beta), eps = eps
       )
       b_hat <- NULL
-      var_b <- NULL
     }
 
         # M-step: update each group's parameters
@@ -151,8 +149,7 @@ Cox_com_fit <- function(transformed_data,  maxit = 1000, tolerance = 1e-6, frail
         status = transformed_data$status,
         X_l    = transformed_data$X[[l]],
         eta_l  = eta_matrix[, l],
-        b_hat  = b_hat,
-        var_b = var_b
+        b_hat  = b_hat
       )
       # Check that bh_times and lambda have the same length
       if (length(param_updater$bh_times) != length(param_updater$lambda_l)) {
@@ -180,24 +177,12 @@ Cox_com_fit <- function(transformed_data,  maxit = 1000, tolerance = 1e-6, frail
     }
   }
   
-  if (frailty) {
-    return(list(
-      param_new  = param_new,
-      eta_matrix = eta_matrix,
-      b_hat = b_hat,
-      sigma2 = sigma2,
-      var_b = var_b
-    ))
-  }else{
-    return(list(
-      param_new  = param_new,
-      eta_matrix = eta_matrix
-    ))
-  }
-  
-  
   # Return final parameters and last eta matrix
-  
+  return(list(
+    param_new  = param_new,
+    eta_matrix = eta_matrix,
+    b_hat = b_hat
+  ))
 }
 
 
@@ -231,9 +216,9 @@ eta_matrix_fun <- function(time, status, X, bh_times, lambda, beta, eps = 5e-2) 
 
 
 
-update_l <- function(time, status, X_l, eta_l, b_hat, var_b){
+update_l <- function(time, status, X_l, eta_l, b_hat){
   
-  pseudo_data <- make_pseudo(time, status, X_l, eta_l, b_hat, var_b)
+  pseudo_data <- make_pseudo(time, status, X_l, eta_l, b_hat)
   
   covariate_names <-  names(pseudo_data)[!(colnames(pseudo_data) %in% c("time", "status", "eta", "b_hat"))]
   
@@ -283,7 +268,7 @@ update_l <- function(time, status, X_l, eta_l, b_hat, var_b){
 
 
 
-make_pseudo <- function(time, status, X, eta, b_hat, var_b) {
+make_pseudo <- function(time, status, X, eta, b_hat) {
   # If X is a matrix, ensure column names exist
   if (is.null(colnames(X))) {
     colnames(X) <- paste0("V", seq_len(ncol(X)))
@@ -298,21 +283,12 @@ make_pseudo <- function(time, status, X, eta, b_hat, var_b) {
   }
   
   # For censored subjects, set weight to 1
-  if (!is.null(var_b)) {
-    df$eta[df$status == 0] <- exp(var_b[df$status == 0]/2)
-    df_pseudo <- df[df$status == 1, ]          # select failures
-    df_pseudo$eta <- exp(var_b[df$status == 1]/2) - df_pseudo$eta       
-    df_pseudo$status <- 0
-    
-  } else{
-    df$eta[df$status == 0] <- 1
-    
-    # Create pseudo-censored copies for observed failures
-    df_pseudo <- df[df$status == 1, ]          # select failures
-    df_pseudo$eta <- 1 - df_pseudo$eta         # complementary weight
-    df_pseudo$status <- 0
-    
-  }
+  df$eta[df$status == 0] <- 1
+  
+  # Create pseudo-censored copies for observed failures
+  df_pseudo <- df[df$status == 1, ]          # select failures
+  df_pseudo$eta <- 1 - df_pseudo$eta         # complementary weight
+  df_pseudo$status <- 0
   
   # mark as censored
   # Combine original and pseudo observations
@@ -352,102 +328,8 @@ update_frailty_gaussian_sigma <- function(time, status, X, bh_times, cum_lambda,
   # Update sigma^2
   sigma2_new <- mean(b^2 + var_b)
   
-  return(list(b = b, sigma2 = sigma2_new, var_b = var_b))
+  return(list(b = b, sigma2 = sigma2_new))
 }
-
-
-
-
-
-
-
-## Profile likelihood
-
-update_frailty_gaussian_fixed_sigma <- function(time, status, X,
-                                                bh_times, cum_lambda,
-                                                beta, sigma2) {
-  
-  n <- length(time)
-  L <- length(X)
-  
-  # compute cumulative hazard
-  cumhaz_total <- numeric(n)
-  
-  for (l in seq_len(L)) {
-    idx <- findInterval(time, bh_times[[l]])
-    cumhaz_total <- cumhaz_total +
-      cum_lambda[[l]][idx] * exp(drop(X[[l]] %*% beta[[l]]))
-  }
-  
-  # solve for b_hat
-  b <- sapply(seq_len(n), function(i) {
-    f <- function(bi) {
-      status[i] - cumhaz_total[i] * exp(bi) - bi / sigma2
-    }
-    uniroot(f, lower = -20, upper = 20)$root
-  })
-  
-  # variance
-  var_b <- 1 / (cumhaz_total * exp(b) + 1 / sigma2)
-  
-  return(list(b = b, var_b = var_b))
-}
-
-
-update_lambdat_frailty <- function(beta_list, b_hat, fit_result, transformed_data, tol = 1e-4, max_iter = 100) {
-  
-  L <- length(beta_list)
-  time <- transformed_data$time
-  status <- transformed_data$status
-  
-  lambda_list <- lapply(fit_result$param_new, function(x) x$lambda)
-  bh_times_list <- lapply(fit_result$param_new, function(x) x$bh_times)
-  
-  # exp(Xβ + b)
-  risk_list <- lapply(seq_len(L), function(l) {
-    exp(transformed_data$X[[l]] %*% beta_list[[l]] + b_hat)
-  })
-  
-  # risk set sums
-  Ys_list <- lapply(risk_list, function(risk_vec) rev(cumsum(rev(risk_vec))))
-  
-  for (iter in seq_len(max_iter)) {
-    
-    eta_matrix <- eta_matrix_fun(
-      time     = time,
-      status   = status,
-      X        = transformed_data$X,
-      bh_times = bh_times_list,
-      lambda   = lambda_list,
-      beta     = beta_list
-    )
-    
-    lambda_new <- vector("list", L)
-    
-    for (l in seq_len(L)) {
-      lambda_new[[l]] <- numeric(length(bh_times_list[[l]]))
-      
-      for (j in seq_along(bh_times_list[[l]])) {
-        idx <- which(findInterval(time, bh_times_list[[l]]) == j & status == 1)
-        
-        if (length(idx) > 0) {
-          lambda_new[[l]][j] <- sum(eta_matrix[idx, l]) / sum(Ys_list[[l]][idx])
-        }
-      }
-    }
-    
-    diff <- max(sapply(seq_len(L), function(l) max(abs(lambda_new[[l]] - lambda_list[[l]]))))
-    lambda_list <- lambda_new
-    
-    if (diff < tol) break
-  }
-  
-  return(lambda_list)
-}
-
-
-
-
 
 
 update_lambdat <- function(fit_result, transformed_data, tol = 1e-4, max_iter = 100) {
@@ -502,63 +384,6 @@ update_lambdat <- function(fit_result, transformed_data, tol = 1e-4, max_iter = 
 }
 
 
-loglikelihood_frailty <- function(beta_list, sigma2, b_hat, var_b,
-                                  lambda_list, fit_result, transformed_data) {
-  
-  n <- length(transformed_data$time)
-  L <- length(beta_list)
-  
-  time <- transformed_data$time
-  status <- transformed_data$status
-  
-  bh_times_list <- lapply(fit_result$param_new, function(x) x$bh_times)
-  
-  loglik <- 0
-  
-  linpred_list <- lapply(seq_len(L), function(l) {
-    as.vector(transformed_data$X[[l]] %*% beta_list[[l]] + b_hat)
-  })
-  
-
-  
-  
-  ## --- failure term ---
-  for (i in seq_len(n)) {
-    if (status[i] == 1) {
-      tmp <- 0
-      for (l in seq_len(L)) {
-        idx <- pmax(findInterval(time[i], bh_times_list[[l]]), 1)
-        tmp <- tmp + lambda_list[[l]][idx] * exp(linpred_list[[l]][i])
-      }
-      loglik <- loglik + log(tmp)
-    }
-  }
-  
-  ## --- cumulative hazard ---
-  for (l in seq_len(L)) {
-    bh_times_l <- bh_times_list[[l]]
-    lambda_l <- lambda_list[[l]]
-    linpred_l <- linpred_list[[l]]
-    
-    for (j in seq_along(bh_times_l)) {
-      t_j <- bh_times_l[j]
-      at_risk <- which(time >= t_j)
-      loglik <- loglik - lambda_l[j] * sum(exp(linpred_l[at_risk]))
-    }
-  }
-  
-  ## --- frailty Laplace correction ---
-  loglik <- loglik -
-    sum(b_hat^2) / (2 * sigma2) -
-    n/2 * log(sigma2) +
-    0.5 * sum(log(var_b))
-  
-  return(loglik)
-}
-
-
-
-
 loglikelihood <- function(fit_result, transformed_data) {
   n <- length(transformed_data$time)
   L <- length(fit_result)
@@ -575,7 +400,7 @@ loglikelihood <- function(fit_result, transformed_data) {
     as.vector(transformed_data$X[[l]] %*% beta_list[[l]])
   })
   
-#  # Term 1: sum over failures
+  # Term 1: sum over failures
   for (i in seq_len(n)) {
     if (transformed_data$status[i] == 1) {
       tmp <- 0
@@ -605,235 +430,102 @@ loglikelihood <- function(fit_result, transformed_data) {
   return(loglik)
 }
 
-
-
-
-profile_loglikelihood <- function(beta_list_fixed, sigma2 = NULL,
-                                  fit_result, transformed_data,
-                                  frailty = FALSE,
-                                  tol = 1e-4, max_iter = 100) {
+profile_loglikelihood <- function(beta_list_fixed, fit_result, transformed_data, tol = 1e-4, max_iter = 100) {
+  L <- length(fit_result)
   
-  L <- length(fit_result$param_new)
-  time <- transformed_data$time
-  status <- transformed_data$status
-  
-  # --------------------------------
-  # Step 1: update beta
-  # --------------------------------
-  fit_beta_fixed <- fit_result$param_new
-  
+  # Step 1: Update lambda to NPMLE given fixed beta
+  # We replace the beta in fit_result with the fixed beta_list
+  fit_beta_fixed <- fit_result
   for (l in seq_len(L)) {
     fit_beta_fixed[[l]]$beta <- beta_list_fixed[[l]]
   }
   
-  # --------------------------------
-  # Step 2: frailty (if needed)
-  # --------------------------------
-  if (frailty) {
-    frailty_fit <- update_frailty_gaussian_fixed_sigma(
-      time   = time,
-      status = status,
-      X      = transformed_data$X,
-      bh_times = lapply(fit_result$param_new, function(x) x$bh_times),
-      cum_lambda = lapply(fit_result$param_new, function(x) x$cum_lambda),
-      beta   = beta_list_fixed,
-      sigma2 = sigma2
-    )
-    
-    b_hat <- frailty_fit$b
-    var_b <- frailty_fit$var_b
-  } else {
-    b_hat <- rep(0, length(time))
-    var_b <- NULL
-  }
+  # Step 2: Update lambda using self-consistency
+  lambda_npmle <- update_lambdat(fit_beta_fixed, transformed_data, tol = tol, max_iter = max_iter)
   
-  # --------------------------------
-  # Step 3: update lambda
-  # --------------------------------
-  if (frailty) {
-    lambda_npmle <- update_lambdat_frailty(
-      beta_list_fixed, b_hat, fit_result,
-      transformed_data, tol, max_iter
-    )
-  } else {
-    lambda_npmle <- update_lambdat(
-      fit_beta_fixed, transformed_data, tol, max_iter
-    )
-  }
-  
-  # plug lambda
+  # Replace the lambda in fit_result with the updated lambda
   for (l in seq_len(L)) {
     fit_beta_fixed[[l]]$lambda <- lambda_npmle[[l]]
   }
   
-  # --------------------------------
-  # Step 4: likelihood
-  # --------------------------------
-  if (frailty) {
-    loglik <- loglikelihood_frailty(
-      beta_list_fixed, sigma2, b_hat, var_b,
-      lambda_npmle, fit_result, transformed_data
-    )
-  } else {
-    loglik <- loglikelihood(fit_beta_fixed, transformed_data)
-  }
+  # Step 3: Compute log-likelihood with updated lambda
+  loglik <- loglikelihood(fit_beta_fixed, transformed_data)
   
   return(loglik)
 }
 
 
-cov_theta_profile <- function(fit_result, transformed_data, sigma2 = NULL, frailty = FALSE, 
-                              eps = 1e-4, tol = 1e-2, fast = TRUE, max_iter = 100) {
+cov_beta_profile <- function(fit_result, transformed_data, eps = 1e-4, tol = 1e-2, fast=TRUE, max_iter = 100) {
+  L <- length(fit_result)
   
-  L <- length(fit_result$param_new)
+  # Extract the estimated beta
+  beta_hat <- lapply(fit_result, function(x) x$beta)
   
-  beta_hat <- lapply(fit_result$param_new, function(x) x$beta)
+  # Flatten beta into a single vector for convenience
   beta_vec <- unlist(beta_hat)
+  p <- length(beta_vec)
   
-  # --------------------------------
-  # Parameter vector
-  # --------------------------------
-  if (frailty) {
-    theta_vec <- c(beta_vec, sigma2)
-  } else {
-    theta_vec <- beta_vec
-  }
+  # Initialize covariance matrix
+  cov_mat <- matrix(0, nrow = p, ncol = p)
   
-  p <- length(theta_vec)
-  cov_mat <- matrix(0, p, p)
-  
-  # --------------------------------
-  # reconstruct parameters
-  # --------------------------------
-  vector_to_params <- function(vec) {
+  # Helper to reconstruct beta_list from vector
+  vector_to_beta_list <- function(vec) {
     beta_list <- vector("list", L)
     idx <- 1
-    
     for (l in seq_len(L)) {
-      pl <- length(fit_result$param_new[[l]]$beta)
+      pl <- length(fit_result[[l]]$beta)
       beta_list[[l]] <- vec[idx:(idx + pl - 1)]
       idx <- idx + pl
     }
-    
-    if (frailty) {
-      sigma2_val <- max(vec[p], 1e-6)
-    } else {
-      sigma2_val <- NULL
-    }
-    
-    return(list(beta = beta_list, sigma2 = sigma2_val))
+    return(beta_list)
   }
   
+  # Compute the profile log-likelihood at beta_hat
+  loglik_0 <- profile_loglikelihood(beta_hat, fit_result, transformed_data, tol, max_iter)
   
-  # --------------------------------
-  # baseline loglik
-  # --------------------------------
-  param0 <- vector_to_params(theta_vec)
-  
-  loglik_0 <- profile_loglikelihood(
-    param0$beta, param0$sigma2,
-    fit_result, transformed_data,
-    frailty, tol, max_iter
-  )
- 
-  # --------------------------------
-  # diagonal
-  # --------------------------------
+  # Finite-difference to approximate Hessian
   for (i in seq_len(p)) {
     
-    e_i <- rep(0, p); e_i[i] <- eps
+    e_i <- rep(0, p)
+    e_i[i] <- eps
     
-    param_plus  <- vector_to_params(theta_vec + e_i)
-    param_minus <- vector_to_params(theta_vec - e_i)
+    beta_plus  <- vector_to_beta_list(beta_vec + e_i)
+    beta_minus <- vector_to_beta_list(beta_vec - e_i)
     
-    loglik_plus <- profile_loglikelihood(
-      param_plus$beta, max(param_plus$sigma2, 1e-4),
-      fit_result, transformed_data,
-      frailty, tol, max_iter
-    )
+    loglik_plus  <- profile_loglikelihood(beta_plus, fit_result, transformed_data, tol, max_iter)
+    loglik_minus <- profile_loglikelihood(beta_minus, fit_result, transformed_data, tol, max_iter)
     
-    loglik_minus <- profile_loglikelihood(
-      param_minus$beta, max(param_minus$sigma2, 1e-4),
-      fit_result, transformed_data,
-      frailty, tol, max_iter
-    )
-    
-    cov_mat[i,i] <- abs(loglik_plus - 2*loglik_0 + loglik_minus)/(eps^2)
+    # Negative second derivative along i-th coordinate
+    cov_mat[i, i] <- abs (loglik_plus - 2 * loglik_0 + loglik_minus) / (eps^2)
   }
-
   
-  
-    # --------------------------------
-  # off-diagonal (optional)
-  # --------------------------------
-  if (!fast) {
+  if(!fast){
     for (i in 1:(p-1)) {
       for (j in (i+1):p) {
+        e_i <- rep(0, p); e_i[i] <- eps
+        e_j <- rep(0, p); e_j[j] <- eps
         
-        e_i <- rep(0,p); e_i[i] <- eps
-        e_j <- rep(0,p); e_j[j] <- eps
+        beta_pp <- vector_to_beta_list(beta_vec + e_i + e_j)
+        beta_pm <- vector_to_beta_list(beta_vec + e_i - e_j)
+        beta_mp <- vector_to_beta_list(beta_vec - e_i + e_j)
+        beta_mm <- vector_to_beta_list(beta_vec - e_i - e_j)
         
-        log_pp <- profile_loglikelihood(vector_to_params(theta_vec + e_i + e_j)$beta,
-                                        max(vector_to_params(theta_vec + e_i + e_j)$sigma2, 1e-4),
-                                        fit_result, transformed_data, frailty, tol, max_iter)
+        log_pp <- profile_loglikelihood(beta_pp, fit_result, transformed_data, tol, max_iter)
+        log_pm <- profile_loglikelihood(beta_pm, fit_result, transformed_data, tol, max_iter)
+        log_mp <- profile_loglikelihood(beta_mp, fit_result, transformed_data, tol, max_iter)
+        log_mm <- profile_loglikelihood(beta_mm, fit_result, transformed_data, tol, max_iter)
         
-        log_pm <- profile_loglikelihood(vector_to_params(theta_vec + e_i - e_j)$beta,
-                                        max(vector_to_params(theta_vec + e_i - e_j)$sigma2, 1e-4),
-                                        fit_result, transformed_data, frailty, tol, max_iter)
-        
-        log_mp <- profile_loglikelihood(vector_to_params(theta_vec - e_i + e_j)$beta,
-                                        max(vector_to_params(theta_vec - e_i + e_j)$sigma2, 1e-4),
-                                        fit_result, transformed_data, frailty, tol, max_iter)
-        
-        log_mm <- profile_loglikelihood(vector_to_params(theta_vec - e_i - e_j)$beta,
-                                        max(vector_to_params(theta_vec - e_i - e_j)$sigma2, 1e-4),
-                                        fit_result, transformed_data, frailty, tol, max_iter)
-        
-        cov_mat[i,j] <- cov_mat[j,i] <-
-          - (log_pp - log_pm - log_mp + log_mm)/(4*eps^2)
+        cov_mat[i, j] <- cov_mat[j, i] <- - (log_pp - log_pm - log_mp + log_mm) / (4 * eps^2)
       }
     }
   }
-  
+  # Invert Hessian to get covariance matrix
   cov_mat <- solve(cov_mat)
-  se <- sqrt(diag(cov_mat))
+  se_beta <- sqrt(diag(cov_mat))
   
-  # --------------------------------
-  # split SE by groups
-  # --------------------------------
-  se_by_group <- vector("list", L)
-  cov_by_group <- vector("list", L)
-  
-  idx <- 1
-  
-  for (l in seq_len(L)) {
-    pl <- length(fit_result$param_new[[l]]$beta)
-    
-    inds <- idx:(idx + pl - 1)
-    
-    se_by_group[[l]] <- se[inds]
-    cov_by_group[[l]] <- cov_mat[inds, inds, drop = FALSE]
-    
-    idx <- idx + pl
-  }
-  
-  # handle sigma2 separately
-  if (frailty) {
-    se_sigma2 <- se[p]  # delta method: var(exp(x)) ≈ exp(x)^2 var(x)
-  } else {
-    se_sigma2 <- NULL
-  }
-  
-  
-  return(list(
-    cov_mat = cov_mat,
-    se = se,
-    se_by_group = se_by_group,
-    cov_by_group = cov_by_group,
-    se_sigma2 = se_sigma2
-  ))
-  
+  return(list(cov_mat= cov_mat, se_beta =  se_beta))
 }
+
 
 
 calculate_total_hazard <- function(time_points, result, transformed_data) {
@@ -878,48 +570,3 @@ calculate_total_hazard <- function(time_points, result, transformed_data) {
   return(list(hazard_matrix= hazard_matrix, S_matrix =  S_matrix))
 }
 
-library(survival)
-
-compute_iAUC <- function(transformed_data, result){
-  
-  time_points <- quantile(transformed_data$time, probs = seq(0.01, 0.99, by = 0.05))
-  total_hazard <- calculate_total_hazard(time_points, result, transformed_data)
-  
-  time_AUC <- riskRegression::Score(
-    object   = list(
-      competing_Cox = total_hazard$hazard_matrix 
-    ),                 # n x K risk matrix
-    formula  = Surv(time, status) ~ 1,
-    data     = data.frame(
-      time   = transformed_data$time,    # T_i
-      status = transformed_data$status   # delta_i (1=event, 0=censored)
-    ),
-    times    = time_points,
-    metrics  = "AUC",
-    cens.model = "km"
-  )
-
-
-  return(iAUC = mean(time_AUC$AUC$score$AUC))
-}
-
-compute_iBS <- function(transformed_data, result){
-  
-  time_points <- quantile(transformed_data$time, probs = seq(0.01, 0.99, by = 0.05))
-  total_hazard <- calculate_total_hazard(time_points, result, transformed_data)
-  
-  bs_res <- riskRegression::Score(
-    object      = list(competingCox = 1 - total_hazard$S_matrix),
-    formula     = Surv(time, status) ~ 1,
-    data        = data.frame(
-      time   = transformed_data$time,
-      status = transformed_data$status
-    ),
-    times       = time_points,
-    metrics     = "Brier",
-    cens.model  = "km"
-  )
-  
-  return(iBS=mean(bs_res$Brier$score$Brier[which(bs_res$Brier$score$model=="competingCox")])
-  )
-}
